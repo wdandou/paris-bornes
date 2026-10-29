@@ -132,6 +132,10 @@ if bornes is None or bornes.empty:
         "`AWS_SECRET_ACCESS_KEY` (et `AWS_REGION`), ou `ALH_EMAIL` / `ALH_PASSWORD`. "
         "Redémarrez ensuite l'application pour relancer la collecte."
     )
+    with st.expander("Diagnostic des sources", expanded=True):
+        from etl import diagnostic_sources
+        st.dataframe(diagnostic_sources(), hide_index=True, width='stretch')
+        st.caption("`AWS_REGION` absent : la région par défaut `eu-north-1` est utilisée.")
     st.stop()
 
 bornes["num_arrondissement"] = pd.to_numeric(bornes["num_arrondissement"], errors="coerce")

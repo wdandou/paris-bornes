@@ -56,6 +56,41 @@ def lecture_s3(source):
         return None
     
 
+def diagnostic_sources(sources=("belib_stat", "belib_rt", "irve_conso", "irve_dyn", "paris_population")):
+    """État de la configuration et de l'accès aux sources, sans exposer la valeur des secrets."""
+    lignes = []
+    for nom in ("S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "ALH_EMAIL", "ALH_PASSWORD"):
+        lignes.append({"Élément": f"Secret {nom}", "État": "défini" if os.environ.get(nom) else "absent"})
+
+    if S3_BUCKET:
+        try:
+            s3 = boto3.client("s3", region_name=AWS_REGION)
+        except Exception as e:
+            s3 = None
+            lignes.append({"Élément": "Client S3", "État": f"KO : {type(e).__name__}"})
+        for source in sources if s3 else ():
+            cle = f"raw/data/{source}.csv"
+            try:
+                s3.head_object(Bucket=S3_BUCKET, Key=cle)
+                etat = "OK"
+            except Exception as e:
+                code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+                etat = f"KO : {type(e).__name__} {code}".strip()
+            lignes.append({"Élément": f"S3 {cle}", "État": etat})
+
+    if EMAIL and PASSWORD:
+        jour = heure_reference().strftime("%Y-%m-%d")
+        try:
+            r = requests.get("https://alh-consulting.com/api/bornes-ve/data",
+                             params={"source": "belib_stat", "from": jour, "to": jour},
+                             auth=(EMAIL, PASSWORD), timeout=30)
+            etat = f"HTTP {r.status_code}, {len(r.content)} octets"
+        except requests.exceptions.RequestException as e:
+            etat = f"KO : {type(e).__name__}"
+        lignes.append({"Élément": "API Airflow (belib_stat)", "État": etat})
+
+    return pd.DataFrame(lignes)
+
 def lecture_airflow(source, fromdate=None, todate=None):
     try:
         maintenant = heure_reference()
@@ -76,6 +111,9 @@ def lecture_airflow(source, fromdate=None, todate=None):
             auth = (EMAIL, PASSWORD)  # authentification basique avec email et mot de passe
 
             response = requests.get(url, params=params, auth=auth, timeout=60)
+            if response.status_code != 200 or not response.text.strip():
+                print(f"Attention : [{source}] API Airflow KO : HTTP {response.status_code}, {len(response.content)} octets")
+                return None
             df = pd.read_csv(io.StringIO(response.text), low_memory=False, dtype={
             "code_insee_commune": str,
             "prise_type_ef": str,
