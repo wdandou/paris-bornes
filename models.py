@@ -120,7 +120,7 @@ class Energie(Base):
         return f"<Energie {self.conso_totale_mwh} MWh | Arr. {self.num_arrondissement}>"
 
 class Population(Base):
-    """Population par arrondissement — source INSEE 2021."""
+    """Population par arrondissement — source INSEE (recensement)."""
     __tablename__ = "population"
     
     num_arrondissement = Column(Integer, primary_key=True)

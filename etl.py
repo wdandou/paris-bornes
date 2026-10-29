@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 import boto3
+import sources_publiques
 
 # Configuration S3
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
@@ -17,6 +18,8 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "datasets/")
 AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1")
 EMAIL = os.environ.get("ALH_EMAIL")
 PASSWORD = os.environ.get("ALH_PASSWORD")
+# Statuts de disponibilité : une copie sur S3 serait périmée, ils sont lus directement sur les API
+SOURCES_TEMPS_REEL = {"belib_rt", "irve_dyn"}
 # Retard (en heures) des derniers snapshots disponibles sur l'API Airflow, exprimé en UTC
 DECALAGE_HEURES = int(os.environ.get("ETL_DECALAGE_HEURES", "2"))
 
@@ -26,20 +29,25 @@ def heure_reference():
     return maintenant - timedelta(hours=DECALAGE_HEURES)
 
 def collect_data(source, fromdate=None, todate=None, force=False):
-    """Lit depuis S3, fallback sur l'API Airflow si S3 non configuré."""
-    
-    # Priorité 1 : S3
-    if S3_BUCKET and not force:
+    """Lit depuis S3, puis les API publiques, puis l'API Airflow si elle est configurée."""
+
+    # Priorité 1 : S3 (sauf pour les statuts temps réel, toujours lus en direct)
+    if S3_BUCKET and not force and source not in SOURCES_TEMPS_REEL:
         df = lecture_s3(source)
         if df is not None:
             return df
-    
+
+    # Priorité 2 : API publiques (Paris Data, data.gouv.fr, transport.data.gouv.fr, INSEE)
+    df = sources_publiques.lire_source(source)
+    if df is not None and not df.empty:
+        return df
+
     # Fallback : API Airflow (ancien comportement)
     if EMAIL and PASSWORD:
         return lecture_airflow(source, fromdate, todate)
-    
-    #Cas extrême si aucun des deux ne fonctionne on renvoie une erreur
-    print(f"Ni S3 ni Airflow configurés pour {source}")
+
+    #Cas extrême si aucune source ne fonctionne on renvoie None
+    print(f"Aucune source disponible pour {source}")
     return None
 
 def lecture_s3(source):
@@ -136,6 +144,9 @@ def harmoniser_gireve(df):
     """Normalise les colonnes Gireve pour la fusion avec le dataset principal."""
     df = df.copy()
     df['num_arrondissement'] = df['adresse_station'].apply(extraire_num_arrondissement)
+    # Adresse sans code postal exploitable : on se rabat sur le code INSEE déclaré
+    if "code_insee_commune" in df.columns:
+        df['num_arrondissement'] = df['num_arrondissement'].fillna(df['code_insee_commune'].apply(parser_arrondissement))
     df["code_insee_commune"] = df['num_arrondissement'].apply(lambda x: f"751{int(x):02d}" if pd.notna(x) else None)
     df = df[df["code_insee_commune"].between("75101", "75120")]
     print(f"Nombre d'enregistrements uniques récupérés pour Gireve : {len(df)} lignes")
@@ -256,7 +267,7 @@ def recuperer_liste_stations_belib(maj_airflow=False):
     statuts = recuperer_statuts_pdc_belib(maj_airflow)
     if statuts is not None and not statuts.empty:
         # Conversion du timestamp pour pouvoir trier
-        statuts["snapshot_at"] = pd.to_datetime(statuts["snapshot_at"])
+        statuts["snapshot_at"] = pd.to_datetime(statuts["snapshot_at"], format="ISO8601", utc=True, errors="coerce")
         
         # Pour chaque id_pdc, on garde donc la ligne la plus récente et on supprime les autres, afin d'avoir un seul statut actuel par point de charge.
         statuts_derniers = (statuts.sort_values("snapshot_at").drop_duplicates(subset="id_pdc", keep="last")[["id_pdc", "statut_pdc"]].rename(columns={"statut_pdc": "statut_actuel"}))
@@ -285,7 +296,7 @@ def recuperer_statuts_pdc_gireve():
         return pd.DataFrame()
     data = data.rename(columns={"statut_actuel": "occupation_pdc"})
     if "snapshot_at" in data.columns:
-        data["snapshot_at"] = pd.to_datetime(data["snapshot_at"])
+        data["snapshot_at"] = pd.to_datetime(data["snapshot_at"], format="ISO8601", utc=True, errors="coerce")
         data = data.sort_values("snapshot_at").drop_duplicates(subset="id_pdc_itinerance", keep="last")
     print(f"Récupération des statuts IRVE / Gireve du {fromdate} au {todate}.")
     return data
@@ -323,7 +334,9 @@ def recuperer_vehicules_electriques():
     # Source 1 : Agence ORE
     url = ("https://opendata.agenceore.fr/api/explore/v2.1/catalog/datasets/"
            "voitures-par-commune-par-energie/exports/csv"
-           "?use_labels=false&delimiter=%3B")
+           "?use_labels=false&delimiter=%3B"
+           # Filtre côté serveur sur Paris : évite de télécharger l'export national complet
+           "&where=startswith(codgeo%2C%20%22751%22)")
     url1 = pd.read_csv(url, sep=";", low_memory=False)
     url1["codgeo"] = url1["codgeo"].astype(str)
     url1 = url1[url1["codgeo"].str.match(r"^751(0[1-9]|1[0-9]|20)$")]
@@ -336,13 +349,13 @@ def recuperer_vehicules_electriques():
     return url1
 
 def recuperer_population():
-    """Récupère le fichier population depuis S3 et le charge en DataFrame."""
-    print("Récupération des données population depuis S3.")
-    
+    """Récupère la population par arrondissement (S3, sinon API INSEE Melodi)."""
+    print("Récupération des données population.")
+
     try:
-        df = lecture_s3("paris_population")
+        df = collect_data("paris_population")
         if df is None or df.empty:
-            print("Population : fichier introuvable sur S3 (attendu : raw/data/paris_population.csv)")
+            print("Population : indisponible sur S3 (raw/data/paris_population.csv) et sur l'API INSEE")
             return pd.DataFrame()
         df = df.dropna(subset=["CODGEO"])
         df["num_arrondissement"] = df["CODGEO"].astype(int) - 75100
@@ -368,38 +381,33 @@ def enedis_paris_data(annee):
     )
 
     all_data = []
-    page = 1
-    size = 993
+    total = None
+    # Pagination par curseur (lien "next") : la pagination par numéro de page
+    # est refusée au-delà de 10 000 lignes, alors que Paris en compte davantage.
+    url = base_url
+    params = {
+        "qs": f"code_departement:75 AND annee:{annee}",
+        "size": 5000,
+        "select": "code_iris,code_commune,nom_commune,code_grand_secteur,conso_totale_mwh,nb_sites",
+    }
 
-    while True:
-        try:
-            response = requests.get(base_url, params={
-                "qs": f"code_departement:75 AND annee:{annee}",
-                "size": size,
-                "select": "code_iris,code_commune,nom_commune,code_grand_secteur,conso_totale_mwh,nb_sites",
-                "page": page,
-            }, timeout=60)
-            response.raise_for_status()
+    while url:
+        response = requests.get(url, params=params, timeout=60)
+        response.raise_for_status()
 
-            data = response.json()
-            results = data.get("results", [])
+        data = response.json()
+        results = data.get("results", [])
+        if not results:
+            break
+        all_data.extend(results)
 
-            if not results:
-                break
+        # Le total n'est renvoyé que sur la première page
+        total = data.get("total") or total
+        if total and len(all_data) >= total:
+            break
 
-            all_data.extend(results)
-
-            total = data.get("total", 0)
-            if len(all_data) >= total:
-                break
-
-            page += 1
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                print(f"⚠️ Enedis pagination terminée à la page {page}")
-                break
-            raise
+        # Le lien "next" contient déjà tous les paramètres de la requête
+        url, params = data.get("next"), None
 
     df = pd.DataFrame(all_data)
     if df.empty:

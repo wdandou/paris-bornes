@@ -127,10 +127,10 @@ population = data.get("population")
 if bornes is None or bornes.empty:
     st.error("Aucune donnée de bornes trouvée.")
     st.markdown(
-        "Les bornes Belib' et IRVE sont lues sur **S3** ou, à défaut, sur l'**API Airflow**. "
-        "Vérifiez les secrets de l'application : `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, "
-        "`AWS_SECRET_ACCESS_KEY` (et `AWS_REGION`), ou `ALH_EMAIL` / `ALH_PASSWORD`. "
-        "Redémarrez ensuite l'application pour relancer la collecte."
+        "Les bornes Belib' et IRVE sont lues sur **S3** si un fichier y est déposé, sinon sur les "
+        "**API publiques** (Paris Data, data.gouv.fr, transport.data.gouv.fr), puis sur l'**API Airflow** "
+        "si `ALH_EMAIL` / `ALH_PASSWORD` sont définis. Ces API étaient peut-être indisponibles lors de la "
+        "collecte : redémarrez l'application pour la relancer."
     )
     with st.expander("Diagnostic des sources", expanded=True):
         from etl import diagnostic_sources
@@ -190,7 +190,7 @@ with st.sidebar:
                 statuts = recuperer_statuts_pdc_belib(True)
 
                 if statuts is not None and not statuts.empty:
-                    statuts["snapshot_at"] = pd.to_datetime(statuts["snapshot_at"])
+                    statuts["snapshot_at"] = pd.to_datetime(statuts["snapshot_at"], format="ISO8601", utc=True, errors="coerce")
                     statuts = statuts.sort_values("snapshot_at").drop_duplicates(subset="id_pdc", keep="last")
 
                     # Mettre à jour le DataFrame en mémoire
@@ -541,15 +541,10 @@ with tab_energie:
     
 with tab_population:
     if population is None or population.empty:
-        st.info("Données démographiques non disponibles.")
-        from etl import lecture_s3, S3_BUCKET
-        st.caption(f"S3_BUCKET configuré : `{S3_BUCKET or '(vide)'}`")
-        df_debug = lecture_s3("paris_population")
-        if df_debug is None:
-            st.error("❌ `raw/data/paris_population.csv` introuvable sur S3")
-        else:
-            st.success(f"✅ Fichier trouvé sur S3 ({len(df_debug)} lignes) — problème ailleurs")
-            st.dataframe(df_debug.head(3))
+        st.info(
+            "Données démographiques non disponibles : ni `raw/data/paris_population.csv` sur S3, "
+            "ni l'API INSEE Melodi n'ont répondu lors de la collecte."
+        )
     else:
         df_pop = population.copy()
         df_pop["num_arrondissement"] = pd.to_numeric(df_pop["num_arrondissement"], errors="coerce")
@@ -558,10 +553,14 @@ with tab_population:
         df_pop = df_pop[df_pop["num_arrondissement"].isin(arr_selectionnes)]
         df_pop["label"] = df_pop["num_arrondissement"].apply(lambda x: f"{x}{'er' if x == 1 else 'e'} arr.")
 
-        st.markdown("### Population par arrondissement (2021)")
+        # Année du recensement fournie par la source (INSEE Melodi) ; 2021 pour l'ancien fichier S3
+        annee_pop = "2021"
+        if "annee" in df_pop.columns and df_pop["annee"].notna().any():
+            annee_pop = str(int(df_pop["annee"].dropna().max()))
+        st.markdown(f"### Population par arrondissement ({annee_pop})")
         st.markdown(
         "> Répartition de la population totale entre **mineurs (0–17 ans)** et **majeurs (18 ans et +)** "
-        "pour chaque arrondissement parisien — source INSEE 2021."
+        f"pour chaque arrondissement parisien — source INSEE, recensement {annee_pop}."
             )
         col_graph, col_carte = st.columns([3, 2])
 

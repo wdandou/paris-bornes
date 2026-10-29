@@ -34,15 +34,19 @@ Application en ligne : https://huggingface.co/spaces/wdandou/paris-bornes (code 
 ```
  Sources                     Collecte / nettoyage      Calculs & orchestration       Stockage                 Restitution
  ───────                     ────────────────────      ───────────────────────       ────────                 ───────────
- S3 (raw/data/*.csv) ─┐
- API Airflow ALH ─────┼──►  etl.py  ───────────────►  bornes_arrondissements.py ──► bornes.db (SQLite) ──► streamlit_app.py
- Agence ORE (VE) ─────┤     (collect_data,             (pression, projections,       ./data/*.csv           + streamlit_additions.py
- Enedis (conso) ──────┘      harmonisation, fusion)     persistance, upload S3)       S3 (optionnel)
+ S3 (optionnel) ──────┐
+ API publiques ───────┤     sources_publiques.py
+  (Paris Data,        ├──►  etl.py  ───────────────►  bornes_arrondissements.py ──► bornes.db (SQLite) ──► streamlit_app.py
+   data.gouv, INSEE)  │     (collect_data,             (pression, projections,       ./data/*.csv           + streamlit_additions.py
+ Agence ORE (VE) ─────┤      harmonisation, fusion)     persistance, upload S3)       S3 (optionnel)
+ Enedis (conso) ──────┤
+ API Airflow (opt.) ──┘
 ```
 
 | Fichier | Rôle |
 |---|---|
-| `etl.py` | Collecte des sources (S3 en priorité, API Airflow en repli, API publiques), harmonisation et fusion Belib' / IRVE |
+| `etl.py` | Collecte des sources (S3, puis API publiques, puis API Airflow), harmonisation et fusion Belib' / IRVE |
+| `sources_publiques.py` | Lecture des 5 sources brutes sur les API publiques, au format attendu par `etl.py` ; utilisable aussi en ligne de commande |
 | `bornes_arrondissements.py` | Pipeline complet : ETL → pression → projections → SQLite / CSV → upload S3 |
 | `models.py` | Modèles SQLAlchemy (`bornes`, `vehicules_electriques`, `pression`, `energie`, `population`) |
 | `database.py` | Accès à la base SQLite `bornes.db` (sauvegarde, chargement, jointures) |
@@ -57,19 +61,26 @@ Application en ligne : https://huggingface.co/spaces/wdandou/paris-bornes (code 
 
 | Donnée | Source | Clé `source` / accès |
 |---|---|---|
-| Bornes Belib' (position, puissance) | Ville de Paris | `belib_stat` |
-| Statut temps réel Belib' | Ville de Paris | `belib_rt` |
-| Bornes IRVE consolidées | data.gouv.fr (Gireve) | `irve_conso` |
-| Statut temps réel IRVE | transport.data.gouv.fr | `irve_dyn` |
-| Parc de véhicules par énergie et par commune | Agence ORE (open data) | API publique |
-| Consommation électrique par IRIS (2022) | Enedis (open data) | `energie` sur S3, sinon API publique |
-| Population par arrondissement (2021) | INSEE | `paris_population` sur S3 |
+| Bornes Belib' (position, puissance) | [Paris Data — Belib' données statiques](https://opendata.paris.fr/explore/dataset/belib-points-de-recharge-pour-vehicules-electriques-donnees-statiques/) | `belib_stat` |
+| Statut temps réel Belib' | [Paris Data — Belib' disponibilité temps réel](https://opendata.paris.fr/explore/dataset/belib-points-de-recharge-pour-vehicules-electriques-disponibilite-temps-reel/) | `belib_rt` |
+| Bornes IRVE consolidées (statique) | [data.gouv.fr — Base nationale des IRVE](https://www.data.gouv.fr/fr/datasets/fichier-consolide-des-bornes-de-recharge-pour-vehicules-electriques/), filtrée sur Paris | `irve_conso` |
+| Statut temps réel IRVE | [transport.data.gouv.fr — base consolidée IRVE dynamique](https://transport.data.gouv.fr/datasets/beta-bases-nationales-des-points-de-recharge-pour-vehicules-electriques-en-france-irve) | `irve_dyn` |
+| Population par âge et par arrondissement | [INSEE Melodi](https://portail-api.insee.fr/) — `DS_RP_TD_POPULATION_AGESEX_PRINC` (recensement 2023) | `paris_population` |
+| Parc de véhicules par énergie et par commune | Agence ORE (open data), filtré sur Paris côté serveur | API publique |
+| Consommation électrique par IRIS (2022) | Enedis (open data), pagination par curseur | `energie` sur S3, sinon API publique |
 
-Les sources marquées d'une clé sont lues par `etl.collect_data()` :
+Aucune de ces API ne demande de clé. Les sources marquées d'une clé sont lues par `etl.collect_data()`, dans cet ordre :
 
-1. **S3** : `s3://$S3_BUCKET/raw/data/<source>.csv` ;
-2. en repli, **API Airflow** : `https://alh-consulting.com/api/bornes-ve/data?source=<source>&from=…&to=…` (authentification basique) ;
-3. si aucune des deux ne répond, `None` est renvoyé et l'étape concernée est ignorée.
+1. **S3** : `s3://$S3_BUCKET/raw/data/<source>.csv`, si le bucket est configuré et que le fichier existe. Les statuts temps réel (`belib_rt`, `irve_dyn`) sautent cette étape, car une copie sur S3 serait périmée ;
+2. **API publiques** (`sources_publiques.py`) ;
+3. **API Airflow** (`https://alh-consulting.com/api/bornes-ve/data`), seulement si `ALH_EMAIL` / `ALH_PASSWORD` sont définis ;
+4. si rien ne répond, `None` est renvoyé et l'étape concernée est ignorée.
+
+Pour obtenir les 5 fichiers bruts sans lancer l'application :
+```bash
+python sources_publiques.py                 # écrit les CSV dans ./data/sources/
+python sources_publiques.py --s3            # les envoie aussi sur s3://$S3_BUCKET/raw/data/
+```
 
 ---
 
@@ -85,7 +96,7 @@ Les sources marquées d'une clé sont lues par `etl.collect_data()` :
 ### 2. Données de contexte
 - **Parc VE** (Agence ORE) : filtré sur les 20 arrondissements, puis agrégé par trimestre (`evolution_parc_ve`) et sauvegardé dans la table `vehicules_electriques`.
 - **Consommation électrique** (Enedis, 2022) : paginée par IRIS et rattachée à l'arrondissement.
-- **Population** (INSEE 2021) : calcul de la part des majeurs.
+- **Population** (INSEE, recensement 2023) : mineurs = somme des âges 0 à 17 ans, puis calcul de la part des majeurs.
 
 ### 3. Pression actuelle (`calculer_pression`)
 - **Pression = nombre de VE / nombre de points de charge**, sur le dernier trimestre disponible.
@@ -137,13 +148,13 @@ Variables d'environnement, à définir en local ou dans les *Secrets* du Space H
 
 | Variable | Obligatoire | Description |
 |---|---|---|
-| `S3_BUCKET` | recommandé | Bucket S3 contenant `raw/data/*.csv` (population et énergie notamment) |
+| `S3_BUCKET` | non | Bucket S3 : sources prioritaires dans `raw/data/*.csv`, et dépôt des CSV produits |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | si S3 | Identifiants AWS utilisés par boto3 |
 | `AWS_REGION` | non | Région S3 (défaut : `eu-north-1`) |
-| `ALH_EMAIL` / `ALH_PASSWORD` | si pas de S3 | Identifiants de l'API Airflow |
+| `ALH_EMAIL` / `ALH_PASSWORD` | non | Identifiants de l'API Airflow, dernier recours |
 | `ETL_DECALAGE_HEURES` | non | Retard, en heures UTC, du dernier snapshot temps réel demandé à l'API (défaut : `2`) |
 
-Sans S3 ni identifiants Airflow, seules les sources publiques (Agence ORE, Enedis) sont collectées. Dans ce cas, l'application n'a pas de bornes à afficher.
+**Aucune variable n'est obligatoire** : sans S3 ni Airflow, toutes les données proviennent des API publiques. La première collecte prend alors environ une minute, dont le téléchargement du fichier national IRVE (environ 115 Mo).
 
 ---
 
@@ -185,7 +196,7 @@ L'en-tête YAML de ce README configure le Space (`sdk: docker`, `app_port: 8501`
 ## Limites et pistes d'amélioration
 - **Projections** : croissance exponentielle à taux fixe, avec une cible de 10 VE par borne. Ce sont des hypothèses simplificatrices, et un modèle de Machine Learning pourrait affiner la prévision.
 - **Énergie additionnelle** : estimée forfaitairement à 2,5 MWh/an par borne ; la capacité réelle des postes du réseau n'est pas modélisée.
-- **Données** : la consommation électrique date de 2022 et la population de 2021. Les statuts temps réel dépendent de la fraîcheur des snapshots Airflow.
+- **Données** : la consommation électrique date de 2022 et la population du recensement 2023. Les statuts IRVE temps réel ne couvrent qu'une partie des points de charge parisiens (beaucoup restent « Inconnu ») ; ceux de Belib' sont complets.
 - **Évolutions envisagées** :
   - enrichir et harmoniser davantage les sources ;
   - automatiser le pipeline avec Airflow ;
