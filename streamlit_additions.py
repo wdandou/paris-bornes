@@ -121,7 +121,7 @@ def render_tab_projection(geojson, arr_selectionnes=None):
                 },
             )
             fig.update_layout(
-                mapbox_style="open-street-map",
+                map_style="open-street-map",
                 margin=dict(l=0, r=0, t=0, b=0),
             )
             st.plotly_chart(fig, width='stretch')
@@ -292,7 +292,7 @@ def render_tab_energie(geojson):
                 },
             )
             fig.update_layout(
-                mapbox_style="open-street-map",
+                map_style="open-street-map",
                 margin=dict(l=0, r=0, t=0, b=0),
             )
             st.plotly_chart(fig, width='stretch')

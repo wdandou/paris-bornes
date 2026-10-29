@@ -301,7 +301,7 @@ with tab_carte:
                 "source": "Source",
             },
         )
-        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+        fig.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, width='stretch')
     
     elif vue == "Puissance":
@@ -324,7 +324,7 @@ with tab_carte:
             color_discrete_map=couleurs_puissance,
             zoom=11, height=700,
         )
-        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+        fig.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, width='stretch')
     
     elif vue == "Choroplèthe" and geojson:
@@ -353,7 +353,7 @@ with tab_carte:
                 "occupees": "Occupés",
             },
         )
-        fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+        fig.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, width='stretch')
  
  
@@ -389,7 +389,7 @@ with tab_pression:
                     "nb_ve": "Véhicules électriques",
                 },
             )
-            fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+            fig.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
             st.plotly_chart(fig, width='stretch')
         
         with col_classement:
@@ -472,7 +472,7 @@ with tab_energie:
                         "nb_sites": "Nombre de sites",
                     },
                 )
-                fig_nrj.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+                fig_nrj.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
                 st.plotly_chart(fig_nrj, width='stretch')
             
             with col_pression_energie:
@@ -623,7 +623,7 @@ with tab_population:
             },
         )
             fig_map.update_layout(
-                mapbox_style="open-street-map",
+                map_style="open-street-map",
                 margin=dict(l=0, r=0, t=0, b=0),
             )
             st.plotly_chart(fig_map, width='stretch')
