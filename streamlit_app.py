@@ -134,8 +134,10 @@ if bornes is None or bornes.empty:
     )
     with st.expander("Diagnostic des sources", expanded=True):
         from etl import diagnostic_sources
-        st.dataframe(diagnostic_sources(), hide_index=True, width='stretch')
-        st.caption("`AWS_REGION` absent : la région par défaut `eu-north-1` est utilisée.")
+        # Tableau HTML statique : lisible même sans rendu canvas
+        st.table(diagnostic_sources().set_index("Élément"))
+        if not os.environ.get("AWS_REGION"):
+            st.caption("`AWS_REGION` absent : la région par défaut `eu-north-1` est utilisée.")
     st.stop()
 
 bornes["num_arrondissement"] = pd.to_numeric(bornes["num_arrondissement"], errors="coerce")
