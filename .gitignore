@@ -1,0 +1,4 @@
+__pycache__/
+bornes.db
+data/*.csv
+data/.etl_termine

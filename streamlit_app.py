@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import json
 import os
+import runpy
+import threading
 from typing import Optional
 import folium
 from folium.plugins import MarkerCluster, HeatMap
@@ -28,11 +30,35 @@ st.set_page_config(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 filterable_values = True
 
-if not os.path.exists(os.path.join(BASE_DIR, "bornes.db")):
-    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
-    script = os.path.join(BASE_DIR, "bornes_arrondissements.py")
-    if os.path.exists(script):
-        exec(open(script).read())
+# Marqueur écrit à la fin du pipeline : bornes.db existe dès les premières sauvegardes,
+# il ne suffit donc pas à savoir si la collecte est terminée.
+ETL_MARQUEUR = os.path.join(BASE_DIR, "data", ".etl_termine")
+
+
+@st.cache_resource
+def verrou_etl():
+    """Verrou partagé par toutes les sessions pour ne lancer qu'une collecte à la fois."""
+    return threading.Lock()
+
+
+def preparer_donnees():
+    """Lance le pipeline au premier démarrage ; les autres sessions attendent sa fin."""
+    if os.path.exists(ETL_MARQUEUR):
+        return
+    with verrou_etl():
+        if os.path.exists(ETL_MARQUEUR):
+            return
+        os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+        script = os.path.join(BASE_DIR, "bornes_arrondissements.py")
+        if os.path.exists(script):
+            with st.spinner("Première collecte des données en cours, cela peut prendre quelques minutes..."):
+                runpy.run_path(script, run_name="__etl__")
+        with open(ETL_MARQUEUR, "w", encoding="utf-8") as f:
+            f.write(pd.Timestamp.now(tz="UTC").isoformat())
+        st.cache_data.clear()
+
+
+preparer_donnees()
 
 
 @st.cache_data(ttl=300)
