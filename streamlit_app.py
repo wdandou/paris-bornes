@@ -73,33 +73,19 @@ def charger_donnees():
                 sauvegarder_population(pop)
                 data["population"] = pop
 
-        if data.get("population") is not None and not data.get("population").empty and data.get("pression") is not None and not data.get("pression").empty and data.get("energie") is not None and not data.get("energie").empty:
-            data ["energie_pop_pression"] = pd.read_sql("""SELECT 
-                e.num_arrondissement,
-                e.conso_totale_mwh,
-                e.nb_sites,
-                p.pop_total,
-                p.pop_majeurs_18plus,
-                ROUND(e.conso_totale_mwh * 1.0 / p.pop_total, 2) AS mwh_par_habitant,
-                ROUND(e.nb_sites * 1000.0 / p.pop_total, 1) AS sites_pour_1000_hab,
-                pr.nb_pdc,
-                pr.nb_ve,
-                pr.pression
-            FROM energie e
-            LEFT JOIN population p ON e.num_arrondissement = p.num_arrondissement
-            LEFT JOIN pression pr ON e.num_arrondissement = pr.num_arrondissement
-            ORDER BY e.num_arrondissement
-            """, engine)
         return data
 
 
 @st.cache_data(ttl=3600)
 def charger_geojson():
     """Charge le GeoJSON des arrondissements."""
-    geojson_path = os.path.join(BASE_DIR, "arrondissements.geojson")
-    if os.path.exists(geojson_path):
-        with open(geojson_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    for geojson_path in (
+        os.path.join(BASE_DIR, "arrondissements.geojson"),
+        os.path.join(BASE_DIR, "data", "arrondissements.geojson"),
+    ):
+        if os.path.exists(geojson_path):
+            with open(geojson_path, "r", encoding="utf-8") as f:
+                return json.load(f)
     return None
 
 
@@ -114,6 +100,12 @@ population = data.get("population")
 
 if bornes is None or bornes.empty:
     st.error("Aucune donnée de bornes trouvée.")
+    st.markdown(
+        "Les bornes Belib' et IRVE sont lues sur **S3** ou, à défaut, sur l'**API Airflow**. "
+        "Vérifiez les secrets de l'application : `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, "
+        "`AWS_SECRET_ACCESS_KEY` (et `AWS_REGION`), ou `ALH_EMAIL` / `ALH_PASSWORD`. "
+        "Redémarrez ensuite l'application pour relancer la collecte."
+    )
     st.stop()
 
 bornes["num_arrondissement"] = pd.to_numeric(bornes["num_arrondissement"], errors="coerce")
@@ -141,11 +133,6 @@ with st.sidebar:
 
     if not arr_selectionnes:
         st.warning("Sélectionnez au moins un arrondissement.")
-
-    if bornes is not None and not bornes.empty:
-        df_puissance = bornes[
-            bornes["num_arrondissement"].isin(arr_selectionnes)
-        ]
 
     if pression is not None and not pression.empty:
         pression = pression[
@@ -286,7 +273,8 @@ with tab_carte:
         st.plotly_chart(fig, width='stretch')
     
     elif vue == "Puissance":
-        df_puissance = df_puissance.copy()
+        # Même filtrage combiné (arrondissement + statut + puissance) que la vue Disponibilité
+        df_puissance = df_filtre.copy()
         df_puissance["niveau_charge"] = pd.cut(
             df_puissance["puissance_nominale"],
             bins=[0, 7, 22, 999],
@@ -399,13 +387,34 @@ with tab_energie:
     if energie is None or energie.empty or geojson is None:
         st.info("Données de consommation électrique non disponibles.")
     else:
-        df_nrj = database.charger_energie_population()
-        if df_nrj is not None and not df_nrj.empty:
-            df_nrj = df_nrj[df_nrj["num_arrondissement"].isin(arr_selectionnes)].copy()
-            df_nrj["label"] = df_nrj["num_arrondissement"].apply(lambda x: f"{x}er" if x == 1 else f"{x}e")
-            df_nrj = df_nrj.groupby("num_arrondissement").agg(conso_totale_mwh=("conso_totale_mwh", "sum"),nb_sites=("nb_sites", "sum")).reset_index()
-        df_nrj = df_nrj.dropna(subset=["num_arrondissement"])
-        df_nrj["num_arrondissement"] = df_nrj["num_arrondissement"].astype(int)
+        # Agrégation des lignes IRIS par arrondissement (energie est déjà filtré dans la barre latérale)
+        df_nrj = energie.copy()
+        for colonne in ["conso_totale_mwh", "nb_sites"]:
+            df_nrj[colonne] = pd.to_numeric(df_nrj[colonne], errors="coerce")
+        df_nrj = df_nrj.groupby("num_arrondissement").agg(
+            conso_totale_mwh=("conso_totale_mwh", "sum"),
+            nb_sites=("nb_sites", "sum"),
+        ).reset_index()
+
+        # Population et pression sont facultatives : les indicateurs qui en dépendent restent vides si elles manquent
+        if population is not None and not population.empty:
+            df_pop_nrj = population[["num_arrondissement", "pop_total"]].copy()
+            df_pop_nrj["num_arrondissement"] = pd.to_numeric(df_pop_nrj["num_arrondissement"], errors="coerce")
+            df_nrj = df_nrj.merge(df_pop_nrj, on="num_arrondissement", how="left")
+            df_nrj["mwh_par_habitant"] = (df_nrj["conso_totale_mwh"] / df_nrj["pop_total"].replace(0, float("nan"))).round(2)
+        else:
+            df_nrj["pop_total"] = float("nan")
+            df_nrj["mwh_par_habitant"] = float("nan")
+
+        if pression is not None and not pression.empty:
+            df_pr_nrj = pression[["num_arrondissement", "nb_pdc", "pression"]].copy()
+            df_pr_nrj["num_arrondissement"] = pd.to_numeric(df_pr_nrj["num_arrondissement"], errors="coerce")
+            df_nrj = df_nrj.merge(df_pr_nrj, on="num_arrondissement", how="left")
+        else:
+            df_nrj["nb_pdc"] = float("nan")
+            df_nrj["pression"] = float("nan")
+
+        df_nrj["label"] = df_nrj["num_arrondissement"].apply(lambda x: f"{x}er" if x == 1 else f"{x}e")
 
         if df_nrj.empty:
             st.info("Aucune donnée de consommation pour les arrondissements sélectionnés.")
@@ -435,66 +444,67 @@ with tab_energie:
                 st.plotly_chart(fig_nrj, width='stretch')
             
             with col_pression_energie:
-                df_nrj = data.get("energie_pop_pression")
-                if df_nrj is not None and not df_nrj.empty:
-                    df_nrj = df_nrj[df_nrj["num_arrondissement"].isin(arr_selectionnes)].copy()
-                    df_nrj["label"] = df_nrj["num_arrondissement"].apply(lambda x: f"{x}er" if x == 1 else f"{x}e")
-                # Forcer l'agrégation si nécessaire
-                    if len(df_nrj) > 20:
-                        df_nrj = df_nrj.groupby("num_arrondissement").agg(
-                            conso_totale_mwh=("conso_totale_mwh", "sum"),
-                            nb_sites=("nb_sites", "sum"),
-                            pop_total=("pop_total", "first"),
-                            nb_pdc=("nb_pdc", "first"),
-                            pression=("pression", "first"),
-                        ).reset_index()
-                        df_nrj["mwh_par_habitant"] = (df_nrj["conso_totale_mwh"] / df_nrj["pop_total"]).round(2)
-                        df_nrj["label"] = df_nrj["num_arrondissement"].apply(
-                            lambda x: f"{x}er" if x == 1 else f"{x}e"
-                        )
+                st.markdown("#### Consommation, population et pression")
+                df_display = df_nrj[["label", "conso_totale_mwh", "pop_total", "mwh_par_habitant", "nb_pdc", "pression"]].copy()
+                df_display.columns = ["Arrondissement", "Conso (MWh)", "Population", "MWh / hab.", "Points de charge", "Pression"]
+                st.dataframe(
+                    df_display.style.format({
+                        "Conso (MWh)": "{:,.0f}",
+                        "Population": "{:,.0f}",
+                        "MWh / hab.": "{:.2f}",
+                        "Points de charge": "{:,.0f}",
+                        "Pression": "{:.1f}",
+                    }, na_rep="—"),
+                    width='stretch',
+                    height=560,
+                    hide_index=True,
+                )
         
-        # Deux bar charts côte à côte
-        col_g1, col_g2 = st.columns(2)
-        
-        with col_g1:
-            st.markdown("#### Consommation par arrondissement")
-            df_sorted = df_nrj.sort_values("conso_totale_mwh", ascending=True)
-            fig_bar = go.Figure(go.Bar(
-                x=df_sorted["conso_totale_mwh"],
-                y=df_sorted["label"],
-                orientation="h",
-                marker_color=df_sorted["conso_totale_mwh"],
-                marker_colorscale="YlOrRd",
-                text=df_sorted["conso_totale_mwh"].apply(lambda x: f"{x:,.0f}"),
-                textposition="outside",
-            ))
-            fig_bar.update_layout(
-                height=500,
-                xaxis_title="MWh",
-                margin=dict(l=0, r=60, t=10, b=0),
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        with col_g2:
-            st.markdown("#### MWh par habitant")
-            df_sorted2 = df_nrj.sort_values("mwh_par_habitant", ascending=True)
-            fig_bar2 = go.Figure(go.Bar(
-                x=df_sorted2["mwh_par_habitant"],
-                y=df_sorted2["label"],
-                orientation="h",
-                marker_color=df_sorted2["mwh_par_habitant"],
-                marker_colorscale="YlOrRd",
-                text=df_sorted2["mwh_par_habitant"].apply(lambda x: f"{x:.2f}"),
-                textposition="outside",
-            ))
-            fig_bar2.update_layout(
-                height=500,
-                xaxis_title="MWh / habitant",
-                margin=dict(l=0, r=60, t=10, b=0),
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_bar2, use_container_width=True)
+            # Deux bar charts côte à côte
+            col_g1, col_g2 = st.columns(2)
+            
+            with col_g1:
+                st.markdown("#### Consommation par arrondissement")
+                df_sorted = df_nrj.sort_values("conso_totale_mwh", ascending=True)
+                fig_bar = go.Figure(go.Bar(
+                    x=df_sorted["conso_totale_mwh"],
+                    y=df_sorted["label"],
+                    orientation="h",
+                    marker_color=df_sorted["conso_totale_mwh"],
+                    marker_colorscale="YlOrRd",
+                    text=df_sorted["conso_totale_mwh"].apply(lambda x: f"{x:,.0f}"),
+                    textposition="outside",
+                ))
+                fig_bar.update_layout(
+                    height=500,
+                    xaxis_title="MWh",
+                    margin=dict(l=0, r=60, t=10, b=0),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig_bar, width='stretch')
+            
+            with col_g2:
+                st.markdown("#### MWh par habitant")
+                df_sorted2 = df_nrj.dropna(subset=["mwh_par_habitant"]).sort_values("mwh_par_habitant", ascending=True)
+                if df_sorted2.empty:
+                    st.info("Données de population non disponibles : consommation par habitant non calculable.")
+                else:
+                    fig_bar2 = go.Figure(go.Bar(
+                        x=df_sorted2["mwh_par_habitant"],
+                        y=df_sorted2["label"],
+                        orientation="h",
+                        marker_color=df_sorted2["mwh_par_habitant"],
+                        marker_colorscale="YlOrRd",
+                        text=df_sorted2["mwh_par_habitant"].apply(lambda x: f"{x:.2f}"),
+                        textposition="outside",
+                    ))
+                    fig_bar2.update_layout(
+                        height=500,
+                        xaxis_title="MWh / habitant",
+                        margin=dict(l=0, r=60, t=10, b=0),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                    )
+                    st.plotly_chart(fig_bar2, width='stretch')
 
     
 with tab_population:

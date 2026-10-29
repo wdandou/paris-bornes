@@ -1,49 +1,18 @@
-import re
-from numpy import rint
+import io
+import os
+import numpy as np
 import requests
 import pandas as pd
-import plotly.express as px
-import json
-from datetime import datetime, timedelta
-import io
-import database
-import os
-import etl
-from datetime import datetime, timezone
 import boto3
+import database
+import etl
 
-# Configuration S3
-S3_BUCKET = os.environ.get("S3_BUCKET", "")
-S3_PREFIX = os.environ.get("S3_PREFIX", "datasets/")
-AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1")
-EMAIL = os.environ.get("ALH_EMAIL")
-PASSWORD = os.environ.get("ALH_PASSWORD")
+# Dossier de travail pour les CSV intermédiaires
+os.makedirs("./data", exist_ok=True)
+
+# La lecture des API Airflow / S3 est centralisée dans etl.collect_data()
 
 
-def lecture_airflow(source, fromdate=datetime.now().replace(day=datetime.now().day-1).strftime("%Y-%m-%d"), todate=datetime.now().strftime("%Y-%m-%d")):
-    #Par défaut, la fonction collect_data récupère les données pour la date du jour, mais elle peut être utilisée pour récupérer des données sur une période spécifique en fournissant des arguments de date fromdate et todate personnalisés.
-    try:
-        if not EMAIL or not PASSWORD:
-            return None
-        else:
-        #récupérer les données sur le serveur AirFlow, en utilisant une requête GET avec les paramètres d'authentification et de date spécifiés, et en convertissant la réponse JSON en un DataFrame pandas pour une manipulation ultérieure.
-            url = "https://alh-consulting.com/api/bornes-ve/data"
-            params = {
-            "source": source,
-            "from": fromdate,
-            "to": todate,
-            }
-            auth = (EMAIL, PASSWORD)  # authentification basique avec email et mot de passe
-
-            response = requests.get(url, params=params, auth=auth, timeout=60)
-            df = pd.read_csv(io.StringIO(response.text))
-            return df
-    except requests.exceptions.RequestException as e:
-        print(f"Erreur lors de l'import des données : {source} - {e}")
-        return None
-    
-
-    
 def collect_webdata(url):
     response = requests.get(url)
     if response.status_code == 200:
@@ -78,18 +47,19 @@ def calculer_pression(df_bornes, df_vehicules):
     
     # Fusion et calcul de pression dans la fonction
     pression = ve_par_arr.merge(bornes_par_arr, on="num_arrondissement", how="left")
-    pression["nb_pdc"] = pression["nb_pdc"].fillna(0)
-    pression["pression"] = (pression["nb_ve"] / pression["nb_pdc"]).round(1)
-    pression["taux_ve"] = (pression["nb_ve"] / pression["nb_vp_total"] * 100).round(1)
-    
-    # Trier par pression décroissante (les plus sous-équipés en premier)
-    pression = pression.sort_values("pression", ascending=False)
+    pression["nb_pdc"] = pression["nb_pdc"].fillna(0).astype(int)
+    # Un arrondissement sans point de charge a une pression indéfinie (NaN) plutôt qu'infinie
+    pression["pression"] = (pression["nb_ve"] / pression["nb_pdc"].replace(0, np.nan)).round(1)
+    pression["taux_ve"] = (pression["nb_ve"] / pression["nb_vp_total"].replace(0, np.nan) * 100).round(1)
+
+    # Trier par pression décroissante (les plus sous-équipés en premier, puis ceux sans borne)
+    pression = pression.sort_values("pression", ascending=False, na_position="first")
     
     print(f"\nPression VE par arrondissement (trimestre {dernier_trimestre}) :")
     print(pression.to_string(index=False))  
     return pression
 
-def calculer_projections(pression, energie_par_arr=None):
+def calculer_projections(pression):
     """Projette le déficit de bornes sur 1 à 5 ans selon 3 scénarios."""
     
     if pression is None or pression.empty:
@@ -171,51 +141,48 @@ def evolution_parc_ve(df_vehicules):
 stations_belib = etl.recuperer_liste_stations_belib()
 stations_gireve = etl.recuperer_liste_stations_gireve()
 listestations = etl.fusionner_sources(stations_belib, stations_gireve)
-listestations.to_csv("./data/stations_paris.csv", index=False)
 liste_ve = etl.recuperer_vehicules_electriques()
-pression = calculer_pression(listestations,liste_ve)
+parc_ve = evolution_parc_ve(liste_ve)
 energie = etl.enedis_paris_data(2022)
 population = etl.recuperer_population()
 
+if not parc_ve.empty:
+    database.sauvegarder_parc_vehicules(parc_ve)
+
+if not energie.empty:
+    database.sauvegarder_energie(energie)
+
+if not population.empty:
+    database.sauvegarder_population(population)
+
+# Sans bornes (S3 et Airflow indisponibles), pression et projections ne sont pas calculables
 if not listestations.empty:
+    listestations.to_csv("./data/stations_paris.csv", index=False)
     database.sauvegarder_totalite_bornes(listestations)
 
+    pression = calculer_pression(listestations,liste_ve)
+    pression.to_csv("./data/pression_paris.csv", index=False, encoding="utf-8-sig")
     if not pression.empty:
         database.sauvegarder_pression(pression)
 
-    if not energie.empty:
-        database.sauvegarder_energie(energie)
-    
-    if not population.empty:
-        database.sauvegarder_population(population)
+    df_arrdt, df_paris = calculer_projections(pression)
+    if not df_arrdt.empty:
+        # Sauvegarder les CSV pour streamlit_additions.py
+        df_arrdt.to_csv("./data/energie_by_arrdt.csv", index=False)
+        df_paris.to_csv("./data/soutenabilite_scenarios.csv", index=False)
+
+        # Sauvegarder en SQLite aussi
+        database.sauvegarder_projections(df_arrdt, df_paris)
+        print("Projections sauvegardées")
 else:
-    print("Aucune station de recharge n'a pu être affichée sur la carte.")
-
-energie_par_arr = energie.groupby("num_arrondissement").agg(
-    conso_totale_mwh=("conso_totale_mwh", "sum"),
-    nb_sites=("nb_sites", "sum"),
-).reset_index()
-
-# Après le calcul de pression
-df_arrdt, df_paris = calculer_projections(pression, energie_par_arr)
-
-# Sauvegarder les CSV pour streamlit_additions.py
-df_arrdt.to_csv("./data/energie_by_arrdt.csv", index=False)
-df_paris.to_csv("./data/soutenabilite_scenarios.csv", index=False)
-
-# Sauvegarder en SQLite aussi
-database.sauvegarder_projections(df_arrdt, df_paris)
-
-
-print("Projections sauvegardées")
+    print("Aucune station de recharge récupérée : vérifier S3_BUCKET / identifiants AWS ou ALH_EMAIL / ALH_PASSWORD.")
 
 # Upload S3
-S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_BUCKET = etl.S3_BUCKET
 if S3_BUCKET:
-    
-    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "eu-north-1"))
-    run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    
+
+    s3 = boto3.client("s3", region_name=etl.AWS_REGION)
+
     fichiers = {
         "bornes": "./data/stations_paris.csv",
         "pression": "./data/pression_paris.csv",

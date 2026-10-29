@@ -17,6 +17,13 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "datasets/")
 AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1")
 EMAIL = os.environ.get("ALH_EMAIL")
 PASSWORD = os.environ.get("ALH_PASSWORD")
+# Retard (en heures) des derniers snapshots disponibles sur l'API Airflow, exprimé en UTC
+DECALAGE_HEURES = int(os.environ.get("ETL_DECALAGE_HEURES", "2"))
+
+def heure_reference():
+    """Heure pleine UTC du dernier snapshot supposé disponible, indépendante du fuseau du serveur."""
+    maintenant = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+    return maintenant - timedelta(hours=DECALAGE_HEURES)
 
 def collect_data(source, fromdate=None, todate=None, force=False):
     """Lit depuis S3, fallback sur l'API Airflow si S3 non configuré."""
@@ -28,8 +35,6 @@ def collect_data(source, fromdate=None, todate=None, force=False):
             return df
     
     # Fallback : API Airflow (ancien comportement)
-    EMAIL = os.environ.get("ALH_EMAIL")
-    PASSWORD = os.environ.get("ALH_PASSWORD")
     if EMAIL and PASSWORD:
         return lecture_airflow(source, fromdate, todate)
     
@@ -53,12 +58,8 @@ def lecture_s3(source):
 
 def lecture_airflow(source, fromdate=None, todate=None):
     try:
+        maintenant = heure_reference()
         if fromdate is None:
-            maintenant = datetime.now().replace(minute=0, second=0, microsecond=0)
-            if maintenant.hour > 2:
-                maintenant = maintenant.replace(hour=maintenant.hour - 2)
-            else:
-                maintenant = (maintenant - timedelta(days=1)).replace(hour=23)    
             fromdate = (maintenant - timedelta(hours=2)).strftime("%Y-%m-%d")
         if todate is None:
             todate = maintenant.strftime("%Y-%m-%d")
@@ -139,8 +140,12 @@ def harmoniser_belib(df):
 def fusionner_sources(df_belib, df_gireve):
     """Fusionne les deux sources (Gireve et Belib) et retire les éventuels doublons."""
     
-    # Concaténation brute des DataFrames
-    df = pd.concat([df_belib, df_gireve], ignore_index=True)
+    # Concaténation brute des DataFrames (une source indisponible vaut None ou un DataFrame vide)
+    sources = [d for d in (df_belib, df_gireve) if d is not None and not d.empty]
+    if not sources:
+        print("Aucune source de bornes disponible (Belib' et IRVE vides).")
+        return pd.DataFrame()
+    df = pd.concat(sources, ignore_index=True)
     print(f"Lignes issues de la concaténation brute : {len(df)} lignes")
     
     # Dédoublonnage : on garde Belib' en priorité (plus conséquent et déjà optimisé pour Paris)
@@ -180,11 +185,7 @@ def extraire_num_arrondissement(adresse):
 
 def recuperer_statuts_pdc_belib(maj_airflow=False):
     """Récupère le statut temps réel des points de charge Belib'."""
-    maintenant = datetime.now().replace(minute=0, second=0, microsecond=0)
-    if maintenant.hour > 2:
-        maintenant = maintenant.replace(hour=maintenant.hour - 2)
-    else:
-        maintenant = (maintenant - timedelta(days=1)).replace(hour=23)
+    maintenant = heure_reference()
     plus_tot = maintenant - timedelta(minutes=2)
     fromdate = plus_tot.strftime("%Y-%m-%dT%H:%M:%S")
     todate = maintenant.strftime("%Y-%m-%dT%H:%M:%S")
@@ -237,11 +238,7 @@ def recuperer_liste_stations_belib(maj_airflow=False):
 def recuperer_statuts_pdc_gireve():
     #on récupère le statut de disponibilité actualisé de chaque point de charge, en temps réel.
     #Nous ne disposons pas encore du fichier sur le serveur donc nous le récupérons sur le site transports.data.gouv.fr édité par le Ministère des Transports et mis à jour régulièrement.
-    maintenant = datetime.now().replace(minute=0, second=0, microsecond=0)
-    if maintenant.hour > 2:
-        maintenant = maintenant.replace(hour=maintenant.hour - 2)
-    else:
-        maintenant = (maintenant - timedelta(days=1)).replace(hour=23)
+    maintenant = heure_reference()
     plus_tot = maintenant - timedelta(minutes=1)
     fromdate = plus_tot.strftime("%Y-%m-%dT%H:%M:%S")
     todate = maintenant.strftime("%Y-%m-%dT%H:%M:%S")
@@ -300,37 +297,6 @@ def recuperer_vehicules_electriques():
     url1.to_csv("./data/vehicules_electriques_paris_ORE.csv", index=False, encoding="utf-8-sig")
     return url1
 
-# Fonction projections
-def calculer_projections(pression):
-    if pression is None or pression.empty:
-        return pd.DataFrame(), pd.DataFrame()
-    scenarios = {"bas": 0.20, "central": 0.40, "haut": 0.60}
-    PRESSION_CIBLE = 10
-    lignes_arrdt, lignes_paris = [], []
-    for scenario, taux in scenarios.items():
-        for horizon in range(1, 6):
-            total_deficit = 0
-            for _, row in pression.iterrows():
-                arr = int(row["num_arrondissement"])
-                nb_ve = row.get("nb_ve", 0) or 0
-                nb_pdc = row.get("nb_pdc", 0) or 0
-                ve_proj = int(nb_ve * (1 + taux) ** horizon)
-                bornes_cible = max(int(ve_proj / PRESSION_CIBLE), nb_pdc)
-                deficit = max(0, bornes_cible - nb_pdc)
-                pression_proj = round(ve_proj / nb_pdc, 1) if nb_pdc > 0 else 999
-                lignes_arrdt.append({
-                    "arr_num": arr, "scenario": scenario, "horizon_years": horizon,
-                    "ve_projete": ve_proj, "bornes_cible": bornes_cible,
-                    "deficit_bornes": deficit, "pression_projetee": pression_proj,
-                    "energie_add_mwh": round(deficit * 2.5, 1),
-                })
-                total_deficit += deficit
-            lignes_paris.append({
-                "scenario": scenario, "horizon_years": horizon,
-                "deficit_total": total_deficit,
-            })
-    return pd.DataFrame(lignes_arrdt), pd.DataFrame(lignes_paris)
-
 def recuperer_population():
     """Récupère le fichier population depuis S3 et le charge en DataFrame."""
     print("Récupération des données population depuis S3.")
@@ -351,38 +317,6 @@ def recuperer_population():
         print(f"Population pas récupérée sur S3 : {e}")
         return pd.DataFrame()
 
-# Fonction projections
-def calculer_projections(pression):
-    if pression is None or pression.empty:
-        return pd.DataFrame(), pd.DataFrame()
-    scenarios = {"bas": 0.20, "central": 0.40, "haut": 0.60}
-    PRESSION_CIBLE = 10
-    lignes_arrdt, lignes_paris = [], []
-    for scenario, taux in scenarios.items():
-        for horizon in range(1, 6):
-            total_deficit = 0
-            for _, row in pression.iterrows():
-                arr = int(row["num_arrondissement"])
-                nb_ve = row.get("nb_ve", 0) or 0
-                nb_pdc = row.get("nb_pdc", 0) or 0
-                ve_proj = int(nb_ve * (1 + taux) ** horizon)
-                bornes_cible = max(int(ve_proj / PRESSION_CIBLE), nb_pdc)
-                deficit = max(0, bornes_cible - nb_pdc)
-                pression_proj = round(ve_proj / nb_pdc, 1) if nb_pdc > 0 else 999
-                lignes_arrdt.append({
-                    "arr_num": arr, "scenario": scenario, "horizon_years": horizon,
-                    "ve_projete": ve_proj, "bornes_cible": bornes_cible,
-                    "deficit_bornes": deficit, "pression_projetee": pression_proj,
-                    "energie_add_mwh": round(deficit * 2.5, 1),
-                })
-                total_deficit += deficit
-            lignes_paris.append({
-                "scenario": scenario, "horizon_years": horizon,
-                "deficit_total": total_deficit,
-            })
-    return pd.DataFrame(lignes_arrdt), pd.DataFrame(lignes_paris)
-
-    
 def enedis_paris_data(annee):
     """Récupère les données de consommation Enedis pour Paris."""
     if S3_BUCKET:
@@ -430,6 +364,9 @@ def enedis_paris_data(annee):
             raise
 
     df = pd.DataFrame(all_data)
+    if df.empty:
+        print(f"Enedis {annee} : aucune donnée récupérée")
+        return df
     if "code_iris" in df.columns:
         df["num_arrondissement"] = df["code_iris"].astype(str).str[:5].apply(parser_arrondissement)
     elif "code_commune" in df.columns:
@@ -437,10 +374,3 @@ def enedis_paris_data(annee):
     print(f"Enedis {annee} : {len(df)} lignes pour Paris, arrondissements uniques : {df['num_arrondissement'].dropna().unique().tolist()}")
     df.to_csv("./data/energie_paris.csv", index=False, encoding="utf-8-sig")
     return df
-
-
-
-
-    
-
-

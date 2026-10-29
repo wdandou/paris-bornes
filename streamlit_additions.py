@@ -84,11 +84,11 @@ def render_tab_projection(geojson, arr_selectionnes=None):
     sub["niveau_stress"] = sub["pression_projetee"].apply(_niveau_stress)
 
     with col_k1:
-        st.metric("Bornes manquantes (Paris)",
+        st.metric("Bornes manquantes (sélection)",
                   f"{int(sub['deficit_bornes'].sum()):,}".replace(",", " "))
     with col_k2:
         critiques = (sub["niveau_stress"] == "ROUGE").sum()
-        st.metric("Arrdts critiques", f"{critiques} / 20")
+        st.metric("Arrdts critiques", f"{critiques} / {len(sub)}")
 
     col_carte, col_classement = st.columns([3, 2])
 
@@ -159,15 +159,22 @@ def render_tab_classement(arr_selectionnes=None):
         "> Combien de bornes manqueront à Paris, selon la vitesse de croissance du parc VE ?"
     )
 
-    df = charger_scenarios_paris()
-    if df is None:
-        st.info("CSV scénarios non trouvé (`soutenabilite_scenarios.csv`).")
-        return
-
-    if arr_selectionnes:
-        col = "arr_num" if "arr_num" in df.columns else "num_arrondissement" if "num_arrondissement" in df.columns else None
-        if col:
-            df = df[df[col].isin(arr_selectionnes)]
+    # L'agrégat Paris n'a pas de colonne arrondissement : on le recalcule à partir
+    # des projections détaillées pour que le filtre de la barre latérale s'applique.
+    df_arrdt = charger_projections()
+    if df_arrdt is not None:
+        if arr_selectionnes:
+            df_arrdt = df_arrdt[df_arrdt["arr_num"].isin(arr_selectionnes)]
+        df = (
+            df_arrdt.groupby(["scenario", "horizon_years"], as_index=False)
+            .agg(deficit_total=("deficit_bornes", "sum"))
+        )
+    else:
+        df = charger_scenarios_paris()
+        if df is None:
+            st.info("CSV scénarios non trouvé (`soutenabilite_scenarios.csv`).")
+            return
+        st.caption("Projections détaillées indisponibles : total Paris affiché, sans filtre par arrondissement.")
 
     couleurs = {
         "bas": "#2EF598",
@@ -198,7 +205,7 @@ def render_tab_classement(arr_selectionnes=None):
 
     fig.update_layout(
         xaxis_title="Horizon (années)",
-        yaxis_title="Bornes manquantes — Paris total",
+        yaxis_title="Bornes manquantes — total sélection",
         xaxis=dict(tickmode="linear", tick0=1, dtick=1),
         height=500,
         legend=dict(x=0.02, y=0.98),

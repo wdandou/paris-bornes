@@ -64,7 +64,7 @@ def sauvegarder_energie(df_energie):
     """Sauvegarde conso par arrondissement."""
     engine = init_db()
     df_energie.to_sql("energie", engine, if_exists="replace", index=False)
-    print(f"Score de pression sauvegardé pour {len(df_energie)} arrondissements")
+    print(f"Consommation électrique sauvegardée : {len(df_energie)} lignes")
 
 def sauvegarder_parc_vehicules(df_ve):
     """Sauvegarde le parc de VE par arrondissement."""
@@ -92,12 +92,6 @@ def sauvegarder_population(df):
     engine = init_db()
     df.to_sql("population", engine, if_exists="replace", index=False)
     print(f"Population sauvegardée : {len(df)} arrondissements")
-
-def sauvegarder_projections(df_arrdt, df_paris):
-    engine = init_db()
-    df_arrdt.to_sql("projections_arrdt", engine, if_exists="replace", index=False)
-    df_paris.to_sql("projections_paris", engine, if_exists="replace", index=False)
-    print(f"Projections sauvegardées")
 
 def charger_energie_population():
     engine = get_engine()
