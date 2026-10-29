@@ -152,9 +152,14 @@ def harmoniser_gireve(df):
     print(f"Nombre d'enregistrements uniques récupérés pour Gireve : {len(df)} lignes")
     if "coordonneesXY" in df.columns:
         # Parser les coordonnées "[lon, lat]" en deux colonnes
-        coords = df["coordonneesXY"].str.strip("[]").str.split(",", expand=True)
+        # (certaines valeurs ont des espaces autour des crochets : " [2.29 , 48.86] ")
+        coords = df["coordonneesXY"].str.strip().str.strip("[]").str.split(",", expand=True)
         df["longitude"] = pd.to_numeric(coords[0], errors="coerce")
         df["latitude"] = pd.to_numeric(coords[1], errors="coerce")
+    # Coordonnées consolidées par data.gouv.fr en secours
+    for col, col_conso in (("longitude", "consolidated_longitude"), ("latitude", "consolidated_latitude")):
+        if col_conso in df.columns:
+            df[col] = df[col].fillna(pd.to_numeric(df[col_conso], errors="coerce"))
     df["source"] = "gireve"
     
     return df[[

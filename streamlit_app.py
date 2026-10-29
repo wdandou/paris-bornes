@@ -265,6 +265,15 @@ with tab_carte:
         & (bornes["puissance_nominale"].between(puissance_min, puissance_max) | bornes["puissance_nominale"].isna())
     ]
 
+    # Les cartes de points plantent (MapLibre) sur une coordonnée vide : on ne garde que
+    # les points valides situés dans Paris, et on fixe le centre de la carte.
+    coords_valides = (
+        pd.to_numeric(df_filtre["latitude"], errors="coerce").between(48.80, 48.91)
+        & pd.to_numeric(df_filtre["longitude"], errors="coerce").between(2.22, 2.47)
+    )
+    df_carte = df_filtre[coords_valides]
+    CENTRE_PARIS = {"lat": 48.8566, "lon": 2.3522}
+
     vue = st.radio(
         "Type de vue",
         ["Disponibilité", "Puissance", "Choroplèthe"],
@@ -281,7 +290,8 @@ with tab_carte:
             "Inconnu": "#C8DEED",
         }
         fig = px.scatter_map(
-            df_filtre, lat="latitude", lon="longitude",
+            df_carte, lat="latitude", lon="longitude",
+            center=CENTRE_PARIS,
             hover_name="nom_station",
             color="statut_actuel",
             color_discrete_map=couleurs_statuts,
@@ -306,7 +316,7 @@ with tab_carte:
     
     elif vue == "Puissance":
         # Même filtrage combiné (arrondissement + statut + puissance) que la vue Disponibilité
-        df_puissance = df_filtre.copy()
+        df_puissance = df_carte.copy()
         df_puissance["niveau_charge"] = pd.cut(
             df_puissance["puissance_nominale"],
             bins=[0, 7, 22, 999],
@@ -319,6 +329,7 @@ with tab_carte:
         }
         fig = px.scatter_map(
             df_puissance, lat="latitude", lon="longitude",
+            center=CENTRE_PARIS,
             hover_name="nom_station",
             color="niveau_charge",
             color_discrete_map=couleurs_puissance,
