@@ -17,4 +17,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push https://wdandou:$HF_TOKEN@huggingface.co/spaces/wdandou/paris-bornes main
+          git push --force https://wdandou:$HF_TOKEN@huggingface.co/spaces/wdandou/paris-bornes main
