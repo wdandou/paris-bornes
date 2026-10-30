@@ -15,7 +15,7 @@ short_description: Prioriser les zones d'installation des bornes de recharge
 
 **Où installer des bornes de recharge pour véhicules électriques à Paris, combien, et quand ?**
 
-Paris compte environ 6 700 points de charge, répartis de façon inégale entre les arrondissements, alors que le parc de véhicules électriques (VE) progresse rapidement. Le règlement européen **AFIR** fixe un objectif d'**une borne pour 10 VE**.
+Paris compte environ 6 400 points de charge (671 stations), répartis de façon inégale entre les arrondissements, alors que le parc de véhicules électriques (VE) progresse rapidement. Le règlement européen **AFIR** fixe un objectif d'**une borne pour 10 VE**.
 
 Cette application Streamlit croise les données de bornes, de parc automobile, de consommation électrique et de population. Pour chaque arrondissement, elle :
 
@@ -26,6 +26,16 @@ Cette application Streamlit croise les données de bornes, de parc automobile, d
 Application en ligne : https://huggingface.co/spaces/wdandou/paris-bornes (code source : https://github.com/wdandou/paris-bornes)
 
 Équipe : Aymeric LA HONDE, Wilfrid DANDOU, Antoine Charles MBEPA, Grégory HAAS — Projet final Jedha (DSFS).
+
+### Résultats clés (collecte du 30/10/2026)
+
+| Indicateur | Valeur |
+|---|---|
+| Points de charge / stations à Paris | 6 409 / 671 |
+| VE immatriculés (Agence ORE, 31/08/2026) | 101 530 |
+| Pression moyenne Paris | 15,8 VE par point de charge (objectif AFIR : 10) |
+| Arrondissements au-dessus de l'objectif | 16 sur 20 ; les plus tendus : 7e (53), 9e (49), 13e (34), 15e (29) |
+| Bornes manquantes à 3 ans | 11 321 (bas) · 21 458 (central) · 35 167 (haut) |
 
 ---
 
@@ -54,6 +64,8 @@ Application en ligne : https://huggingface.co/spaces/wdandou/paris-bornes (code 
 | `streamlit_additions.py` | Onglets de prospective : projection, évolution du déficit, soutenabilité réseau |
 | `data/arrondissements.geojson` | Contours des 20 arrondissements (clé de jointure `properties.c_ar`) |
 | `Dockerfile` | Image de déploiement (Hugging Face Spaces) |
+| `.github/workflows/sync-to-hf.yml` | GitHub Action : recopie la branche `main` sur le Space Hugging Face à chaque push |
+| `requirements.txt` | Dépendances Python |
 
 ---
 
@@ -138,7 +150,7 @@ Niveau de stress affiché : **vert** si la pression projetée est inférieure à
   6. *Évolution déficit* : courbes des 3 scénarios de 1 à 5 ans, sur les arrondissements sélectionnés ;
   7. *Soutenabilité réseau* : niveau de stress à 3 ans et énergie additionnelle.
 
-> Au **premier lancement**, si `bornes.db` n'existe pas, l'application exécute automatiquement `bornes_arrondissements.py` pour construire la base. Ce premier démarrage peut prendre plusieurs minutes.
+> Au **premier lancement**, si `bornes.db` ou le marqueur `data/.etl_termine` est absent, l'application exécute automatiquement `bornes_arrondissements.py` pour construire la base. Un verrou partagé garantit qu'une seule collecte tourne et qu'aucune session ne lit une base incomplète. Ce premier démarrage prend 1 à 2 minutes.
 
 ---
 
@@ -186,10 +198,17 @@ docker run -p 8501:8501 \
   paris-bornes
 ```
 
-### Sur Hugging Face Spaces
-L'en-tête YAML de ce README configure le Space (`sdk: docker`, `app_port: 8501`). Pour déployer :
-1. pousser le dépôt sur le Space ;
-2. renseigner les variables ci-dessus dans *Settings → Variables and secrets*.
+### Sur Hugging Face Spaces (déploiement continu)
+L'en-tête YAML de ce README configure le Space (`sdk: docker`, `app_port: 8501`). La chaîne de déploiement est la suivante :
+
+```
+poste local ──git push──► GitHub (wdandou/paris-bornes, main) ──GitHub Action──► Space HF ──build Docker──► application en ligne
+```
+
+1. pousser sur la branche `main` du dépôt GitHub ;
+2. la GitHub Action `sync-to-hf.yml` recopie la branche sur le Space (`git push --force`, avec le secret GitHub `HF_TOKEN`, un jeton Hugging Face en écriture) ;
+3. Hugging Face reconstruit l'image Docker et redémarre l'application ; la première visite déclenche la collecte des données ;
+4. les variables optionnelles ci-dessus se renseignent dans *Settings → Variables and secrets* du Space.
 
 ---
 
@@ -197,6 +216,8 @@ L'en-tête YAML de ce README configure le Space (`sdk: docker`, `app_port: 8501`
 - **Projections** : croissance exponentielle à taux fixe, avec une cible de 10 VE par borne. Ce sont des hypothèses simplificatrices, et un modèle de Machine Learning pourrait affiner la prévision.
 - **Énergie additionnelle** : estimée forfaitairement à 2,5 MWh/an par borne ; la capacité réelle des postes du réseau n'est pas modélisée.
 - **Données** : la consommation électrique date de 2022 et la population du recensement 2023. Les statuts IRVE temps réel ne couvrent qu'une partie des points de charge parisiens (beaucoup restent « Inconnu ») ; ceux de Belib' sont complets.
+- **Performances** : sur le matériel gratuit de Hugging Face (2 vCPU partagés), les 7 onglets sont recalculés à chaque interaction ; les cartes apparaissent après 10 à 35 secondes. N'exécuter que l'onglet affiché et simplifier le GeoJSON réduiraient ce délai.
+- **Persistance** : le disque du conteneur est éphémère ; la base est reconstruite à chaque redémarrage du Space.
 - **Évolutions envisagées** :
   - enrichir et harmoniser davantage les sources ;
   - automatiser le pipeline avec Airflow ;
